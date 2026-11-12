@@ -14,8 +14,7 @@ import {
 } from "@/lib/escrow/service";
 
 function makeMockPayPalClient(state: {
-  captureAuthCalls: number;
-  voidCalls: number;
+  payoutCalls: number;
   refundCalls: number;
   lastRefundAmount?: string;
 }) {
@@ -33,7 +32,7 @@ function makeMockPayPalClient(state: {
         { status: 201 }
       );
     }
-    if (url.endsWith("/v2/checkout/orders/ORD-100/authorize")) {
+    if (url.endsWith("/v2/checkout/orders/ORD-100/capture")) {
       return new Response(
         JSON.stringify({
           id: "ORD-100",
@@ -41,10 +40,10 @@ function makeMockPayPalClient(state: {
           purchase_units: [
             {
               payments: {
-                authorizations: [
+                captures: [
                   {
-                    id: "AUTH-100",
-                    status: "CREATED",
+                    id: "CAP-100",
+                    status: "COMPLETED",
                     amount: { currency_code: "USD", value: "300.00" },
                   },
                 ],
@@ -55,19 +54,17 @@ function makeMockPayPalClient(state: {
         { status: 201 }
       );
     }
-    if (url.endsWith("/v2/payments/authorizations/AUTH-100/capture")) {
-      state.captureAuthCalls += 1;
+    if (url.endsWith("/v1/payments/payouts")) {
+      state.payoutCalls += 1;
       return new Response(
         JSON.stringify({
-          id: `CAP-MS-${state.captureAuthCalls}`,
-          status: "COMPLETED",
+          batch_header: {
+            payout_batch_id: `BATCH-${state.payoutCalls}`,
+            batch_status: "PENDING",
+          },
         }),
         { status: 201 }
       );
-    }
-    if (url.endsWith("/v2/payments/authorizations/AUTH-100/void")) {
-      state.voidCalls += 1;
-      return new Response(null, { status: 204 });
     }
     if (url.includes("/refund")) {
       state.refundCalls += 1;
@@ -111,7 +108,7 @@ describe("escrow service & guardrails", () => {
   });
 
   it("enforces funding, auto-release cap, human approval, and guarded refunds", async () => {
-    const ppState = { captureAuthCalls: 0, voidCalls: 0, refundCalls: 0 };
+    const ppState = { payoutCalls: 0, refundCalls: 0 };
     const ppClient = makeMockPayPalClient(ppState);
 
     const contract = await createEscrowContract({
@@ -134,7 +131,7 @@ describe("escrow service & guardrails", () => {
       ],
     });
 
-    // Cannot submit before PayPal Authorization
+    // Cannot submit before PayPal Capture
     await expect(
       submitAndAuditMilestone({
         escrowId: contract.id,
@@ -145,12 +142,12 @@ describe("escrow service & guardrails", () => {
       })
     ).rejects.toThrow("funded");
 
-    // Fund via PayPal Order + Authorization
+    // Fund via PayPal Order + Capture
     const order = await createPayPalEscrowOrder(contract.id, ppClient);
     expect(order.id).toBe("ORD-100");
     await capturePayPalEscrowOrder(contract.id, "ORD-100", ppClient);
 
-    // Milestone 1 ($100 <= $120 cap) passes -> auto-captures $100 from authorization!
+    // Milestone 1 ($100 <= $120 cap) passes -> auto-payout!
     const m1 = await submitAndAuditMilestone({
       escrowId: contract.id,
       milestoneId: contract.milestones[0].id,
@@ -162,8 +159,7 @@ describe("escrow service & guardrails", () => {
     });
     expect(m1.autoPaidOut).toBe(true);
     expect(m1.milestone.status).toBe("PAID_OUT");
-    expect(m1.milestone.paypalCaptureId).toBe("CAP-MS-1");
-    expect(ppState.captureAuthCalls).toBe(1);
+    expect(ppState.payoutCalls).toBe(1);
 
     // Milestone 2 ($200 > $120 cap) passes -> pauses for human sign-off!
     const m2 = await submitAndAuditMilestone({
@@ -176,9 +172,9 @@ describe("escrow service & guardrails", () => {
     });
     expect(m2.autoPaidOut).toBe(false);
     expect(m2.milestone.status).toBe("AWAITING_APPROVAL");
-    expect(ppState.captureAuthCalls).toBe(1);
+    expect(ppState.payoutCalls).toBe(1);
 
-    // Partial refund/release ($50) on Milestone 2, then approve remaining $150
+    // Partial refund ($50) on Milestone 2, then approve remaining $150
     const refunded = await refundMilestone({
       escrowId: contract.id,
       milestoneId: contract.milestones[1].id,
@@ -187,6 +183,7 @@ describe("escrow service & guardrails", () => {
       paypalClient: ppClient,
     });
     expect(refunded.milestone.status).toBe("PARTIAL_REFUND");
+    expect(ppState.refundCalls).toBe(1);
 
     const approved = await approveMilestonePayout({
       escrowId: contract.id,
@@ -200,8 +197,7 @@ describe("escrow service & guardrails", () => {
 
   it("processes webhooks idempotently", async () => {
     const ppClient = makeMockPayPalClient({
-      captureAuthCalls: 0,
-      voidCalls: 0,
+      payoutCalls: 0,
       refundCalls: 0,
     });
     const first = await processPayPalWebhook({

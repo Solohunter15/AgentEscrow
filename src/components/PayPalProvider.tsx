@@ -19,7 +19,7 @@ export function PayPalProvider({
       options={{
         clientId,
         currency: "USD",
-        intent: "authorize",
+        intent: "capture",
       }}
     >
       {children}

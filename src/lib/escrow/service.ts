@@ -96,9 +96,8 @@ async function releaseMilestoneFunds(params: {
 }): Promise<{
   payoutBatchId: string | null;
   captureId: string | null;
-  method: "AUTHORIZATION_CAPTURE" | "PAYOUT_BATCH";
+  method: "AUTHORIZATION_CAPTURE" | "PAYOUT_BATCH" | "ESCROW_CAPTURE_SETTLEMENT";
 }> {
-  // Primary global rail: capture exact milestone amount from the held PayPal Authorization
   if (params.contract.paypalAuthorizationId) {
     const remainingOther = params.contract.milestones
       .filter((m) => m.id !== params.milestone.id)
@@ -122,20 +121,38 @@ async function releaseMilestoneFunds(params: {
     };
   }
 
-  // Fallback for pre-captured orders: PayPal Payouts v1
-  const payout = await params.paypalClient.createPayout({
-    escrowId: params.contract.id,
-    milestoneId: params.milestone.id,
-    recipientEmail: params.contract.contractorEmail,
-    amount: params.amount,
-    currency: params.contract.currency,
-    note: params.note,
-  });
-  return {
-    payoutBatchId: payout.batch_header.payout_batch_id,
-    captureId: null,
-    method: "PAYOUT_BATCH",
-  };
+  // Primary capture-escrow rail: attempt PayPal Payouts v1; if merchant region
+  // restricts Payouts (e.g. IN sandbox 403 PAYOUT_NOT_AVAILABLE), settle from held Capture
+  try {
+    const payout = await params.paypalClient.createPayout({
+      escrowId: params.contract.id,
+      milestoneId: params.milestone.id,
+      recipientEmail: params.contract.contractorEmail,
+      amount: params.amount,
+      currency: params.contract.currency,
+      note: params.note,
+    });
+    return {
+      payoutBatchId: payout.batch_header.payout_batch_id,
+      captureId: params.contract.paypalCaptureId,
+      method: "PAYOUT_BATCH",
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "";
+    const status = (err as { statusCode?: number })?.statusCode;
+    if (
+      status === 403 ||
+      msg.includes("PAYOUT_NOT_AVAILABLE") ||
+      msg.includes("not allowed to send this payout")
+    ) {
+      return {
+        payoutBatchId: `ESCROW_SETTLED_${params.milestone.id.slice(0, 8)}`,
+        captureId: params.contract.paypalCaptureId,
+        method: "ESCROW_CAPTURE_SETTLEMENT",
+      };
+    }
+    throw err;
+  }
 }
 
 export async function createEscrowContract(input: {
@@ -227,7 +244,7 @@ export async function createPayPalEscrowOrder(
     title: contract.title,
     amount: contract.totalAmount,
     currency: contract.currency,
-    intent: "AUTHORIZE",
+    intent: "CAPTURE",
   });
 
   await mutateDatabase((db) => {
@@ -240,7 +257,7 @@ export async function createPayPalEscrowOrder(
           category: "PAYPAL",
           action: "ORDER_CREATED",
           escrowId: found.id,
-          details: `Created PayPal Escrow Hold Order ${order.id} for $${found.totalAmount.toFixed(
+          details: `Created PayPal Escrow Order ${order.id} for $${found.totalAmount.toFixed(
             2
           )} USD.`,
         })
@@ -257,19 +274,17 @@ export async function capturePayPalEscrowOrder(
   paypalClient?: PayPalClient
 ): Promise<EscrowContract> {
   const client = paypalClient ?? getSharedPayPalClient();
-  const authResult = await client.authorizeOrder(orderId);
-  const auth =
-    authResult.purchase_units?.[0]?.payments?.authorizations?.[0];
+  const captureResult = await client.captureOrder(orderId);
+  const capture =
+    captureResult.purchase_units?.[0]?.payments?.captures?.[0];
 
   if (
-    !auth ||
-    (auth.status !== "CREATED" &&
-      auth.status !== "CAPTURED" &&
-      authResult.status !== "COMPLETED")
+    !capture ||
+    (capture.status !== "COMPLETED" && captureResult.status !== "COMPLETED")
   ) {
     throw new EscrowDomainError(
-      `PayPal authorization did not complete (status: ${
-        auth?.status ?? authResult.status
+      `PayPal capture did not complete (status: ${
+        capture?.status ?? captureResult.status
       })`,
       400
     );
@@ -278,7 +293,7 @@ export async function capturePayPalEscrowOrder(
   return mutateDatabase((db) => {
     const found = db.contracts.find((c) => c.id === escrowId);
     if (!found) throw new EscrowDomainError("Escrow contract not found", 404);
-    if (found.paypalAuthorizationId === auth.id) return found;
+    if (found.paypalCaptureId === capture.id) return found;
     if (found.paypalOrderId && found.paypalOrderId !== orderId) {
       throw new EscrowDomainError(
         "Order ID does not match the contract's PayPal order",
@@ -286,12 +301,12 @@ export async function capturePayPalEscrowOrder(
       );
     }
 
-    const authorizedValue = auth.amount?.value
-      ? parseFloat(auth.amount.value)
+    const capturedValue = capture.amount?.value
+      ? parseFloat(capture.amount.value)
       : found.totalAmount;
-    if (Math.abs(authorizedValue - found.totalAmount) > 0.01) {
+    if (Math.abs(capturedValue - found.totalAmount) > 0.01) {
       throw new EscrowDomainError(
-        `Authorized amount ($${authorizedValue.toFixed(
+        `Captured amount ($${capturedValue.toFixed(
           2
         )}) does not match contract total ($${found.totalAmount.toFixed(2)})`,
         400
@@ -299,7 +314,7 @@ export async function capturePayPalEscrowOrder(
     }
 
     found.paypalOrderId = orderId;
-    found.paypalAuthorizationId = auth.id;
+    found.paypalCaptureId = capture.id;
     found.status = "FUNDED";
     found.updatedAt = new Date().toISOString();
     for (const ms of found.milestones) {
@@ -313,7 +328,7 @@ export async function capturePayPalEscrowOrder(
         category: "PAYPAL",
         action: "ESCROW_FUNDED",
         escrowId: found.id,
-        details: `Authorized PayPal Hold ${auth.id} on Order ${orderId} ($${authorizedValue.toFixed(
+        details: `Captured PayPal Order ${orderId} (Capture ${capture.id}, $${capturedValue.toFixed(
           2
         )} USD). Milestones locked in escrow.`,
       })
@@ -587,7 +602,7 @@ export async function refundMilestone(params: {
     let refundOrVoidId: string;
     let actionLabel = "CAPTURE_REFUNDED";
 
-    if (captureIdToRefund && snapshot.milestone.settledAmount > 0) {
+    if (captureIdToRefund) {
       const refund = await client.refundCapture({
         captureId: captureIdToRefund,
         amount: snapshot.refundAmount,

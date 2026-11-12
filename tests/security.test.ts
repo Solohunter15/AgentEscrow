@@ -124,10 +124,10 @@ describe("security & integrity controls", () => {
             purchase_units: [
               {
                 payments: {
-                  authorizations: [
+                  captures: [
                     {
-                      id: "AUTH-X",
-                      status: "CREATED",
+                      id: "CAP-X",
+                      status: "COMPLETED",
                       amount: { currency_code: "USD", value: "50.00" },
                     },
                   ],
