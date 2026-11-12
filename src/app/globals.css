@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --paypal-navy: #003087;
+  --paypal-action: #0070ba;
+  --paypal-blue: #0070e0;
+  --paypal-sky: #009cde;
+  --paypal-gold: #ffc439;
+  --paypal-surface: #f5f7fa;
+  --paypal-ink: #1d1e20;
+  --paypal-muted: #545d68;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  color: var(--paypal-ink);
+  background-color: var(--paypal-surface);
+  background-image:
+    radial-gradient(at 6% 4%, rgba(0, 112, 224, 0.09) 0px, transparent 42%),
+    radial-gradient(at 92% 6%, rgba(0, 48, 135, 0.08) 0px, transparent 40%),
+    radial-gradient(at 72% 85%, rgba(0, 156, 222, 0.07) 0px, transparent 44%);
+  background-attachment: fixed;
+}
+
+.font-serif-display {
+  font-family: var(--font-serif), Georgia, serif;
+}
+
+.font-mono-code {
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Official PayPal Surface Glass */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 14px 38px -14px rgba(0, 48, 135, 0.09),
+    0 2px 8px -2px rgba(29, 30, 32, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
+}
+
+.glass-subpanel {
+  background: #f5f7fa;
+  border: 1px solid #e2e8f0;
+}
+
+/* ReactBits ShinyText in PayPal Navy -> Bright Blue */
+@keyframes shiny-sweep {
+  0% {
+    background-position: 200% center;
+  }
+  100% {
+    background-position: -200% center;
+  }
+}
+
+.shiny-text {
+  background: linear-gradient(
+    110deg,
+    #003087 30%,
+    #0070e0 48%,
+    #009cde 52%,
+    #003087 70%
+  );
+  background-size: 250% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shiny-sweep 6s linear infinite;
+}
+
+@keyframes float-slow {
+  0%,
+  100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-9px) rotate(2deg);
+  }
+}
+
+.animate-float-slow {
+  animation: float-slow 6s ease-in-out infinite;
+}

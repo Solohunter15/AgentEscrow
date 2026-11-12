@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+dist/
+.env
+.env.local
+.env.*.local
+data/escrow-db.json
+tsconfig.tsbuildinfo
+*.log
+.DS_Store
+
